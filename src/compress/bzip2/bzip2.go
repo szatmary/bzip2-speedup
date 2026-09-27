@@ -87,6 +87,9 @@ func (bz2 *reader) Read(buf []byte) (n int, err error) {
 		return 0, io.EOF
 	}
 
+	// Leave the underlying reader positioned just after the input consumed.
+	defer bz2.br.commit()
+
 	if !bz2.setupDone {
 		err = bz2.setup(true)
 		brErr := bz2.br.Err()
@@ -204,7 +207,7 @@ func (bz2 *reader) read(buf []byte) (int, error) {
 			if br.bits%8 != 0 {
 				br.ReadBits(br.bits % 8)
 			}
-			b, err := br.r.ReadByte()
+			b, err := br.readByte()
 			if err == io.EOF {
 				br.err = io.EOF
 				bz2.eof = true
@@ -214,7 +217,7 @@ func (bz2 *reader) read(buf []byte) (int, error) {
 				br.err = err
 				return 0, err
 			}
-			z, err := br.r.ReadByte()
+			z, err := br.readByte()
 			if err != nil {
 				if err == io.EOF {
 					err = io.ErrUnexpectedEOF
@@ -318,7 +321,7 @@ func (bz2 *reader) readBlock() (err error) {
 		length := br.ReadBits(5)
 		for j := range lengths {
 			for {
-				if length < 1 || length > 20 {
+				if length < 1 || length > maxCodeLength {
 					return StructuralError("Huffman length out of range")
 				}
 				if !br.ReadBit() {

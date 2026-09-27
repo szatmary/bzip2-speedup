@@ -5,14 +5,52 @@
 package bzip2
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"internal/obscuretestdata"
 	"io"
 	"os"
 	"strings"
 	"testing"
+	"testing/iotest"
+)
+
+// readerSources are the kinds of io.Reader that take different input paths
+// through the decoder. Each wraps an io.Reader that is not an io.ByteReader.
+var readerSources = []struct {
+	name string
+	wrap func(io.Reader) io.Reader
+}{
+	{"io.Reader", func(r io.Reader) io.Reader { return r }},
+	{"io.ByteReader", func(r io.Reader) io.Reader { return byteReader{r} }},
+	{"bufio.Reader", func(r io.Reader) io.Reader { return bufio.NewReader(r) }},
+	{"bufio.Reader/16", func(r io.Reader) io.Reader { return bufio.NewReaderSize(r, 16) }},
+	{"bufio.Reader/OneByteReader", func(r io.Reader) io.Reader { return bufio.NewReader(iotest.OneByteReader(r)) }},
+}
+
+// plainReader returns an io.Reader of b that is not an io.ByteReader.
+func plainReader(b []byte) io.Reader {
+	return struct{ io.Reader }{bytes.NewReader(b)}
+}
+
+// byteReader is an unbuffered io.ByteReader.
+type byteReader struct{ r io.Reader }
+
+func (br byteReader) Read(p []byte) (int, error) { return br.r.Read(p) }
+
+func (br byteReader) ReadByte() (byte, error) {
+	var b [1]byte
+	_, err := io.ReadFull(br.r, b[:])
+	return b[0], err
+}
+
+// helloWorld is "hello world\n", compressed.
+var helloWorld = mustDecodeHex("" +
+	"425a68393141592653594eece83600000251800010400006449080200031064c" +
+	"4101a7a9a580bb9431f8bb9229c28482776741b0",
 )
 
 func mustDecodeHex(s string) []byte {
@@ -54,11 +92,8 @@ func TestReader(t *testing.T) {
 		output []byte
 		fail   bool
 	}{{
-		desc: "hello world",
-		input: mustDecodeHex("" +
-			"425a68393141592653594eece83600000251800010400006449080200031064c" +
-			"4101a7a9a580bb9431f8bb9229c28482776741b0",
-		),
+		desc:   "hello world",
+		input:  helloWorld,
 		output: []byte("hello world\n"),
 	}, {
 		desc: "concatenated files",
@@ -142,18 +177,84 @@ func TestReader(t *testing.T) {
 	}}
 
 	for i, v := range vectors {
-		rd := NewReader(bytes.NewReader(v.input))
-		buf, err := io.ReadAll(rd)
+		for _, src := range readerSources {
+			rd := NewReader(src.wrap(plainReader(v.input)))
+			buf, err := io.ReadAll(rd)
 
-		if fail := bool(err != nil); fail != v.fail {
-			if fail {
-				t.Errorf("test %d (%s), unexpected failure: %v", i, v.desc, err)
-			} else {
-				t.Errorf("test %d (%s), unexpected success", i, v.desc)
+			if fail := bool(err != nil); fail != v.fail {
+				if fail {
+					t.Errorf("test %d (%s), %s: unexpected failure: %v", i, v.desc, src.name, err)
+				} else {
+					t.Errorf("test %d (%s), %s: unexpected success", i, v.desc, src.name)
+				}
+			}
+			if !v.fail && !bytes.Equal(buf, v.output) {
+				t.Errorf("test %d (%s), %s: output mismatch:\ngot  %s\nwant %s", i, v.desc, src.name, trim(buf), trim(v.output))
 			}
 		}
-		if !v.fail && !bytes.Equal(buf, v.output) {
-			t.Errorf("test %d (%s), output mismatch:\ngot  %s\nwant %s", i, v.desc, trim(buf), trim(v.output))
+	}
+}
+
+// A stream that ends early fails with io.ErrUnexpectedEOF, wherever it is
+// cut short: in the headers, the Huffman-coded data or the trailer.
+func TestReaderTruncated(t *testing.T) {
+	for n := range len(helloWorld) {
+		for _, src := range readerSources {
+			_, err := io.ReadAll(NewReader(src.wrap(plainReader(helloWorld[:n]))))
+			if err != io.ErrUnexpectedEOF {
+				t.Errorf("%s: stream truncated to %d bytes: got error %v, want %v", src.name, n, err, io.ErrUnexpectedEOF)
+			}
+		}
+	}
+}
+
+// errOnceReader returns err from its first Read and io.EOF after that. A
+// *bufio.Reader, for example, reports each error from its reader only once.
+type errOnceReader struct{ err error }
+
+func (r *errOnceReader) Read([]byte) (int, error) {
+	err := r.err
+	if err == nil {
+		return 0, io.EOF
+	}
+	r.err = nil
+	return 0, err
+}
+
+// A read error from the underlying reader is returned as-is, even when it
+// happens while the decoder is reading ahead, and even when the reader
+// reports it only once.
+func TestReaderReadError(t *testing.T) {
+	errRead := errors.New("read error")
+	for n := range len(helloWorld) + 1 {
+		for _, src := range readerSources {
+			r := io.MultiReader(bytes.NewReader(helloWorld[:n]), &errOnceReader{errRead})
+			_, err := io.ReadAll(NewReader(src.wrap(r)))
+			if err != errRead {
+				t.Errorf("%s: read error after %d bytes: got error %v, want %v", src.name, n, err, errRead)
+			}
+		}
+	}
+}
+
+// The decoder reads no further from an io.ByteReader than it must. After the
+// end of a stream, it reads only the two bytes that would begin another.
+func TestReaderStopsAtEndOfStream(t *testing.T) {
+	input := append(bytes.Clone(helloWorld), "not bzip2"...)
+	for _, src := range readerSources {
+		r := src.wrap(plainReader(input))
+		if _, ok := r.(io.ByteReader); !ok {
+			continue // NewReader may read ahead from other readers.
+		}
+		if _, err := io.ReadAll(NewReader(r)); err == nil {
+			t.Fatalf("%s: unexpected success decoding stream with trailing garbage", src.name)
+		}
+		rest, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(rest) != "t bzip2" {
+			t.Errorf("%s: remaining input = %q, want %q", src.name, rest, "t bzip2")
 		}
 	}
 }
@@ -175,19 +276,90 @@ func TestBitReader(t *testing.T) {
 		{nbits: 1, fail: true},
 	}
 
-	rd := bytes.NewReader([]byte{0xab, 0x12, 0x34, 0x56, 0x78, 0x71, 0x3f, 0x8d})
-	br := newBitReader(rd)
-	for i, v := range vectors {
-		val := br.ReadBits(v.nbits)
-		if fail := bool(br.err != nil); fail != v.fail {
-			if fail {
-				t.Errorf("test %d, unexpected failure: ReadBits(%d) = %v", i, v.nbits, br.err)
-			} else {
-				t.Errorf("test %d, unexpected success: ReadBits(%d) = nil", i, v.nbits)
+	for _, src := range readerSources {
+		rd := src.wrap(plainReader([]byte{0xab, 0x12, 0x34, 0x56, 0x78, 0x71, 0x3f, 0x8d}))
+		br := newBitReader(rd)
+		for i, v := range vectors {
+			val := br.ReadBits(v.nbits)
+			if fail := bool(br.err != nil); fail != v.fail {
+				if fail {
+					t.Errorf("%s: test %d, unexpected failure: ReadBits(%d) = %v", src.name, i, v.nbits, br.err)
+				} else {
+					t.Errorf("%s: test %d, unexpected success: ReadBits(%d) = nil", src.name, i, v.nbits)
+				}
+			}
+			if !v.fail && val != v.value {
+				t.Errorf("%s: test %d, mismatching value: ReadBits(%d) = %d, want %d", src.name, i, v.nbits, val, v.value)
 			}
 		}
-		if !v.fail && val != v.value {
-			t.Errorf("test %d, mismatching value: ReadBits(%d) = %d, want %d", i, v.nbits, val, v.value)
+	}
+}
+
+// fill reads whole bytes ahead until more than 56 bits are buffered, but
+// never more than 64, so that the decoder cannot read past the end of a
+// stream. Running out of input is not an error until the missing bits are
+// read.
+func TestBitReaderFill(t *testing.T) {
+	input := []byte{0xab, 0x12, 0x34, 0x56, 0x78, 0x71, 0x3f, 0x8d, 0x01, 0x02}
+	var vectors = []struct {
+		desc   string
+		input  []byte
+		before uint     // bits to read before fill
+		after  []uint   // bits to read after fill
+		values []uint64 // expected values of the reads after fill
+		rest   string   // input fill should leave unread
+	}{{
+		desc:   "empty buffer",
+		input:  input,
+		after:  []uint{32, 32},
+		values: []uint64{0xab123456, 0x78713f8d},
+		rest:   "\x01\x02",
+	}, {
+		desc:   "partial byte buffered",
+		input:  input,
+		before: 3,
+		after:  []uint{29, 32},
+		values: []uint64{0x0b123456, 0x78713f8d},
+		rest:   "\x01\x02",
+	}, {
+		desc:   "short input",
+		input:  input[:2],
+		after:  []uint{16},
+		values: []uint64{0xab12},
+		rest:   "",
+	}}
+
+	for _, v := range vectors {
+		for _, src := range readerSources {
+			r := src.wrap(plainReader(v.input))
+			if _, ok := r.(io.ByteReader); !ok {
+				continue // NewReader may read ahead from other readers.
+			}
+			br := newBitReader(r)
+			br.ReadBits64(v.before)
+			br.fill()
+			br.commit()
+			if br.err != nil {
+				t.Errorf("%s (%s): fill failed: %v", v.desc, src.name, br.err)
+			}
+
+			// Drain the input to check that fill read exactly what it should, and
+			// that the reads below are served from what fill buffered.
+			rest, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(rest) != v.rest {
+				t.Errorf("%s (%s): fill left %q unread, want %q", v.desc, src.name, rest, v.rest)
+			}
+			for i, bits := range v.after {
+				if val := br.ReadBits64(bits); val != v.values[i] || br.err != nil {
+					t.Errorf("%s (%s): ReadBits64(%d) = %#x, %v; want %#x, nil", v.desc, src.name, bits, val, br.err, v.values[i])
+				}
+			}
+			if br.ReadBits64(1); br.err != io.ErrUnexpectedEOF {
+				t.Errorf("%s (%s): reading past the input: got error %v, want %v", v.desc, src.name, br.err, io.ErrUnexpectedEOF)
+			}
 		}
 	}
 }
@@ -228,7 +400,7 @@ var (
 	random = mustLoadFile("testdata/random.data.bz2")
 )
 
-func benchmarkDecode(b *testing.B, compressed []byte) {
+func benchmarkDecode(b *testing.B, compressed []byte, newSource func([]byte) io.Reader) {
 	// Determine the uncompressed size of testfile.
 	uncompressedSize, err := io.Copy(io.Discard, NewReader(bytes.NewReader(compressed)))
 	if err != nil {
@@ -240,11 +412,18 @@ func benchmarkDecode(b *testing.B, compressed []byte) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		r := bytes.NewReader(compressed)
-		io.Copy(io.Discard, NewReader(r))
+		io.Copy(io.Discard, NewReader(newSource(compressed)))
 	}
 }
 
-func BenchmarkDecodeDigits(b *testing.B) { benchmarkDecode(b, digits) }
-func BenchmarkDecodeNewton(b *testing.B) { benchmarkDecode(b, newton) }
-func BenchmarkDecodeRand(b *testing.B)   { benchmarkDecode(b, random) }
+func newBytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
+
+func BenchmarkDecodeDigits(b *testing.B) { benchmarkDecode(b, digits, newBytesReader) }
+func BenchmarkDecodeNewton(b *testing.B) { benchmarkDecode(b, newton, newBytesReader) }
+func BenchmarkDecodeRand(b *testing.B)   { benchmarkDecode(b, random, newBytesReader) }
+
+// The Reader benchmarks decode from an io.Reader that is not an
+// io.ByteReader, such as an *os.File, which NewReader buffers itself.
+func BenchmarkDecodeReaderDigits(b *testing.B) { benchmarkDecode(b, digits, plainReader) }
+func BenchmarkDecodeReaderNewton(b *testing.B) { benchmarkDecode(b, newton, plainReader) }
+func BenchmarkDecodeReaderRand(b *testing.B)   { benchmarkDecode(b, random, plainReader) }

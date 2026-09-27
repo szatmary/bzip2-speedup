@@ -34,25 +34,28 @@ type huffmanNode struct {
 // invalidNodeValue is an invalid index which marks a leaf node in the tree.
 const invalidNodeValue = 0xffff
 
+// maxCodeLength is the maximum length of a Huffman code, in bits.
+const maxCodeLength = 20
+
 // Decode reads bits from the given bitReader and navigates the tree until a
 // symbol is found.
 func (t *huffmanTree) Decode(br *bitReader) (v uint16) {
+	if br.bits < maxCodeLength {
+		br.fill()
+	}
+
+	// Navigate the tree using the buffered bits, most-significant first. The
+	// tree is at most maxCodeLength deep, so the bits for a whole code are
+	// buffered unless the input ended early. In that case, w is padded with
+	// zeros and consuming them reports the error.
+	w := br.n << (64 - br.bits)
 	nodeIndex := uint16(0) // node 0 is the root of the tree.
 
-	for {
+	for depth := uint(1); ; depth++ {
 		node := &t.nodes[nodeIndex]
 
-		var bit uint16
-		if br.bits > 0 {
-			// Get next bit - fast path.
-			br.bits--
-			bit = uint16(br.n>>(br.bits&63)) & 1
-		} else {
-			// Get next bit - slow path.
-			// Use ReadBits to retrieve a single bit
-			// from the underling io.ByteReader.
-			bit = uint16(br.ReadBits(1))
-		}
+		bit := uint16(w >> 63)
+		w <<= 1
 
 		// Trick a compiler into generating conditional move instead of branch,
 		// by making both loads unconditional.
@@ -73,6 +76,7 @@ func (t *huffmanTree) Decode(br *bitReader) (v uint16) {
 			} else {
 				v = r
 			}
+			br.consume(depth)
 			return
 		}
 	}
