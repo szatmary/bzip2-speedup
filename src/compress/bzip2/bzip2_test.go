@@ -348,6 +348,70 @@ func TestBitReaderFill(t *testing.T) {
 	}
 }
 
+// bitsToBytes packs a string of 0s and 1s, ignoring spaces, into bytes.
+func bitsToBytes(s string) []byte {
+	s = strings.ReplaceAll(s, " ", "")
+	b := make([]byte, (len(s)+7)/8)
+	for i, c := range s {
+		if c == '1' {
+			b[i/8] |= 0x80 >> (i % 8)
+		}
+	}
+	return b
+}
+
+func TestHuffmanDecode(t *testing.T) {
+	var vectors = []struct {
+		desc    string
+		lengths []uint8
+		input   string   // Bits to decode
+		want    []uint16 // Expected symbols
+	}{{
+		desc:    "canonical code",
+		lengths: []uint8{1, 2, 3, 3},
+		input:   "0 10 110 111 110 0",
+		want:    []uint16{0, 1, 2, 3, 2, 0},
+	}, {
+		// Symbol i < 20 is i ones followed by a zero.
+		desc:    "codes up to 20 bits",
+		lengths: []uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 20},
+		input: strings.Repeat("1", 20) + " 0 " + strings.Repeat("1", 19) + "0 " +
+			strings.Repeat("1", 11) + "0 10 " + strings.Repeat("1", 20),
+		want: []uint16{20, 0, 19, 11, 1, 20},
+	}, {
+		// Every code begins with the same bit, which the decoder skips.
+		desc:    "superfluous level",
+		lengths: []uint8{2, 2},
+		input:   "0 1 1 0",
+		want:    []uint16{0, 1, 1, 0},
+	}}
+
+	for _, v := range vectors {
+		tree, err := newHuffmanTree(v.lengths)
+		if err != nil {
+			t.Fatalf("%s: %v", v.desc, err)
+		}
+		br := newBitReader(bytes.NewReader(bitsToBytes(v.input + " 10100101")))
+		for i, want := range v.want {
+			if got := tree.Decode(&br); got != want {
+				t.Errorf("%s: symbol %d = %d, want %d", v.desc, i, got, want)
+			}
+		}
+		if got := br.ReadBits(8); got != 0xa5 || br.err != nil {
+			t.Errorf("%s: bits after the codes = %#x, %v; want 0xa5, nil", v.desc, got, br.err)
+		}
+	}
+}
+
+// The block and stream CRCs check the output.
+func TestDecodeTestdata(t *testing.T) {
+	for name, input := range map[string][]byte{"digits": digits, "newton": newton, "random": random} {
+		if _, err := io.Copy(io.Discard, NewReader(bytes.NewReader(input))); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 func TestMTF(t *testing.T) {
 	var vectors = []struct {
 		idx int   // Input index

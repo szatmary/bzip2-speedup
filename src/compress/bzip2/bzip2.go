@@ -348,7 +348,7 @@ func (bz2 *reader) readBlock() (err error) {
 	if int(treeIndexes[0]) >= len(huffmanTrees) {
 		return StructuralError("tree selector out of range")
 	}
-	currentHuffmanTree := huffmanTrees[treeIndexes[0]]
+	currentHuffmanTree := &huffmanTrees[treeIndexes[0]]
 	bufIndex := 0 // indexes bz2.buf, the output buffer.
 	// The output of the move-to-front transform is run-length encoded and
 	// we merge the decoding into the Huffman parsing loop. These two
@@ -369,7 +369,7 @@ func (bz2 *reader) readBlock() (err error) {
 			if int(treeIndexes[selectorIndex]) >= len(huffmanTrees) {
 				return StructuralError("tree selector out of range")
 			}
-			currentHuffmanTree = huffmanTrees[treeIndexes[selectorIndex]]
+			currentHuffmanTree = &huffmanTrees[treeIndexes[selectorIndex]]
 			selectorIndex++
 			decoded = 0
 		}
