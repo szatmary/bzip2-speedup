@@ -14,24 +14,18 @@ import (
 // bit-by-bit, from it. Its Read* methods don't return the usual error
 // because the error handling was verbose. Instead, any error is kept and can
 // be checked afterwards.
-//
-// A bitReader never reads past the end of a bzip2 stream, so an
-// io.ByteReader is left positioned at whatever follows the stream. When the
-// io.ByteReader is a *bufio.Reader, the bitReader reads directly from its
-// buffer and discards the bytes it has consumed when commit is called.
 type bitReader struct {
 	r   io.ByteReader
 	buf *bufio.Reader // r, if it is a *bufio.Reader
 
-	// window holds bytes peeked from buf. The first pos of them have been
-	// consumed, but not yet discarded from buf.
+	// window holds bytes peeked from buf, the first pos of which are consumed.
 	window []byte
 	pos    int
 
-	n       uint64 // buffered bits, in the least-significant bits
-	bits    uint   // number of buffered bits in n
+	n       uint64
+	bits    uint
 	err     error
-	readErr error // the first error reading r, which ends the input
+	readErr error // the first error from r
 }
 
 // newBitReader returns a new bitReader reading from r. If r is not
@@ -45,8 +39,6 @@ func newBitReader(r io.Reader) bitReader {
 	return bitReader{r: byter, buf: buf}
 }
 
-// readByte returns the next byte of input. Once reading fails, it returns
-// the same error without reading again.
 func (br *bitReader) readByte() (byte, error) {
 	if br.readErr != nil {
 		return 0, br.readErr
@@ -67,8 +59,8 @@ func (br *bitReader) readByte() (byte, error) {
 	return b, nil
 }
 
-// peek commits the consumed window and replaces it with the bytes buf has
-// buffered, waiting for more input only if it has none.
+// peek replaces the window with the bytes buffered in buf, blocking only if
+// there are none.
 func (br *bitReader) peek() error {
 	br.commit()
 	if br.buf.Buffered() == 0 {
@@ -76,36 +68,25 @@ func (br *bitReader) peek() error {
 			return err
 		}
 	}
-	// The bytes are already buffered, so Peek cannot fail.
 	br.window, _ = br.buf.Peek(br.buf.Buffered())
 	return nil
 }
 
-// commit discards the consumed bytes of the window from buf, leaving buf
-// positioned just after the last byte the bitReader has read.
+// commit discards the consumed bytes of the window from buf.
 func (br *bitReader) commit() {
 	if br.buf == nil {
 		return
 	}
-	// Discarding buffered bytes cannot fail.
 	br.buf.Discard(br.pos)
 	br.window, br.pos = nil, 0
 }
 
-// fill reads whole bytes until more than 56 bits are buffered, so that the
-// caller can decode several bits without checking for more input.
-//
-// fill reads up to 64 bits ahead of the decoder, which is safe only where
-// at least that much of the stream is sure to follow. It is used when
-// decoding a Huffman-coded symbol, which is always followed by at least 80
-// bits: a block or end-of-stream magic number and a checksum. Thus fill
-// never reads past the end of a stream.
-//
-// If the input ends early, fill stops without reporting an error: that is
-// left to whatever consumes the missing bits.
+// fill reads whole bytes until more than 56 bits are buffered. It is only
+// called while decoding a Huffman symbol, which is always followed by at
+// least 80 bits (a magic number and a CRC), so it never reads past the end
+// of the stream.
 func (br *bitReader) fill() {
 	if len(br.window)-br.pos >= 8 {
-		// Load eight bytes at once, keeping as many as fit.
 		v := binary.BigEndian.Uint64(br.window[br.pos:])
 		k := (64 - br.bits) / 8
 		br.n = br.n<<(8*k) | v>>(64-8*k)
@@ -123,9 +104,7 @@ func (br *bitReader) fill() {
 	}
 }
 
-// consume discards n buffered bits, which the caller has already decoded.
-// If fewer than n bits are buffered, because fill reached the end of the
-// input, consume reports the read error.
+// consume discards n bits, failing if fill ran out of input.
 func (br *bitReader) consume(n uint) {
 	if n > br.bits {
 		br.bits = 0
@@ -135,8 +114,6 @@ func (br *bitReader) consume(n uint) {
 	br.bits -= n
 }
 
-// readFailed records err, which prevented the decoder from reading bits it
-// needed.
 func (br *bitReader) readFailed(err error) {
 	if err == io.EOF {
 		err = io.ErrUnexpectedEOF

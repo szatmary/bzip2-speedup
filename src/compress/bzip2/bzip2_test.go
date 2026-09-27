@@ -18,8 +18,7 @@ import (
 	"testing/iotest"
 )
 
-// readerSources are the kinds of io.Reader that take different input paths
-// through the decoder. Each wraps an io.Reader that is not an io.ByteReader.
+// readerSources wrap a non-ByteReader to exercise each input path.
 var readerSources = []struct {
 	name string
 	wrap func(io.Reader) io.Reader
@@ -31,7 +30,6 @@ var readerSources = []struct {
 	{"bufio.Reader/OneByteReader", func(r io.Reader) io.Reader { return bufio.NewReader(iotest.OneByteReader(r)) }},
 }
 
-// plainReader returns an io.Reader of b that is not an io.ByteReader.
 func plainReader(b []byte) io.Reader {
 	return struct{ io.Reader }{bytes.NewReader(b)}
 }
@@ -47,7 +45,6 @@ func (br byteReader) ReadByte() (byte, error) {
 	return b[0], err
 }
 
-// helloWorld is "hello world\n", compressed.
 var helloWorld = mustDecodeHex("" +
 	"425a68393141592653594eece83600000251800010400006449080200031064c" +
 	"4101a7a9a580bb9431f8bb9229c28482776741b0",
@@ -195,8 +192,6 @@ func TestReader(t *testing.T) {
 	}
 }
 
-// A stream that ends early fails with io.ErrUnexpectedEOF, wherever it is
-// cut short: in the headers, the Huffman-coded data or the trailer.
 func TestReaderTruncated(t *testing.T) {
 	for n := range len(helloWorld) {
 		for _, src := range readerSources {
@@ -208,8 +203,7 @@ func TestReaderTruncated(t *testing.T) {
 	}
 }
 
-// errOnceReader returns err from its first Read and io.EOF after that. A
-// *bufio.Reader, for example, reports each error from its reader only once.
+// errOnceReader returns err once and then io.EOF, like a *bufio.Reader.
 type errOnceReader struct{ err error }
 
 func (r *errOnceReader) Read([]byte) (int, error) {
@@ -221,9 +215,6 @@ func (r *errOnceReader) Read([]byte) (int, error) {
 	return 0, err
 }
 
-// A read error from the underlying reader is returned as-is, even when it
-// happens while the decoder is reading ahead, and even when the reader
-// reports it only once.
 func TestReaderReadError(t *testing.T) {
 	errRead := errors.New("read error")
 	for n := range len(helloWorld) + 1 {
@@ -237,8 +228,6 @@ func TestReaderReadError(t *testing.T) {
 	}
 }
 
-// The decoder reads no further from an io.ByteReader than it must. After the
-// end of a stream, it reads only the two bytes that would begin another.
 func TestReaderStopsAtEndOfStream(t *testing.T) {
 	input := append(bytes.Clone(helloWorld), "not bzip2"...)
 	for _, src := range readerSources {
@@ -253,6 +242,7 @@ func TestReaderStopsAtEndOfStream(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The decoder reads two bytes looking for another stream.
 		if string(rest) != "t bzip2" {
 			t.Errorf("%s: remaining input = %q, want %q", src.name, rest, "t bzip2")
 		}
@@ -295,10 +285,6 @@ func TestBitReader(t *testing.T) {
 	}
 }
 
-// fill reads whole bytes ahead until more than 56 bits are buffered, but
-// never more than 64, so that the decoder cannot read past the end of a
-// stream. Running out of input is not an error until the missing bits are
-// read.
 func TestBitReaderFill(t *testing.T) {
 	input := []byte{0xab, 0x12, 0x34, 0x56, 0x78, 0x71, 0x3f, 0x8d, 0x01, 0x02}
 	var vectors = []struct {
@@ -343,8 +329,6 @@ func TestBitReaderFill(t *testing.T) {
 				t.Errorf("%s (%s): fill failed: %v", v.desc, src.name, br.err)
 			}
 
-			// Drain the input to check that fill read exactly what it should, and
-			// that the reads below are served from what fill buffered.
 			rest, err := io.ReadAll(r)
 			if err != nil {
 				t.Fatal(err)
@@ -422,8 +406,7 @@ func BenchmarkDecodeDigits(b *testing.B) { benchmarkDecode(b, digits, newBytesRe
 func BenchmarkDecodeNewton(b *testing.B) { benchmarkDecode(b, newton, newBytesReader) }
 func BenchmarkDecodeRand(b *testing.B)   { benchmarkDecode(b, random, newBytesReader) }
 
-// The Reader benchmarks decode from an io.Reader that is not an
-// io.ByteReader, such as an *os.File, which NewReader buffers itself.
+// The Reader benchmarks decode from a non-ByteReader, like an *os.File.
 func BenchmarkDecodeReaderDigits(b *testing.B) { benchmarkDecode(b, digits, plainReader) }
 func BenchmarkDecodeReaderNewton(b *testing.B) { benchmarkDecode(b, newton, plainReader) }
 func BenchmarkDecodeReaderRand(b *testing.B)   { benchmarkDecode(b, random, plainReader) }

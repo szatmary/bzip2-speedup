@@ -44,10 +44,7 @@ func (t *huffmanTree) Decode(br *bitReader) (v uint16) {
 		br.fill()
 	}
 
-	// Navigate the tree using the buffered bits, most-significant first. The
-	// tree is at most maxCodeLength deep, so the bits for a whole code are
-	// buffered unless the input ended early. In that case, w is padded with
-	// zeros and consuming them reports the error.
+	// The buffered bits, padded with zeros if the input ended early.
 	w := br.n << (64 - br.bits)
 	nodeIndex := uint16(0) // node 0 is the root of the tree.
 
