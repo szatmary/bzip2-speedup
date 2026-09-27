@@ -5,7 +5,12 @@
 // Package bzip2 implements bzip2 decompression.
 package bzip2
 
-import "io"
+import (
+	"encoding/binary"
+	"hash/crc32"
+	"io"
+	"math/bits"
+)
 
 // There's no RFC for bzip2. I used the Wikipedia page for reference and a lot
 // of guessing: https://en.wikipedia.org/wiki/Bzip2
@@ -471,30 +476,25 @@ func inverseBWT(tt []uint32, origPtr uint, c []uint) uint32 {
 
 // This is a standard CRC32 like in hash/crc32 except that all the shifts are reversed,
 // causing the bits in the input to be processed in the reverse of the usual order.
+// Reversing the bits of each input byte, and of the CRC, lets hash/crc32 compute it.
 
-var crctab [256]uint32
-
-func init() {
-	const poly = 0x04C11DB7
-	for i := range crctab {
-		crc := uint32(i) << 24
-		for j := 0; j < 8; j++ {
-			if crc&0x80000000 != 0 {
-				crc = (crc << 1) ^ poly
-			} else {
-				crc <<= 1
-			}
-		}
-		crctab[i] = crc
-	}
+// updateCRC updates the crc value to incorporate the data in b, which it
+// modifies but restores. The initial value is 0.
+func updateCRC(val uint32, b []byte) uint32 {
+	reverseBits(b)
+	crc := crc32.Update(bits.Reverse32(val), crc32.IEEETable, b)
+	reverseBits(b)
+	return bits.Reverse32(crc)
 }
 
-// updateCRC updates the crc value to incorporate the data in b.
-// The initial value is 0.
-func updateCRC(val uint32, b []byte) uint32 {
-	crc := ^val
-	for _, v := range b {
-		crc = crctab[byte(crc>>24)^v] ^ (crc << 8)
+// reverseBits reverses the order of the bits in each byte of b.
+func reverseBits(b []byte) {
+	i := 0
+	for ; i+8 <= len(b); i += 8 {
+		x := binary.LittleEndian.Uint64(b[i:])
+		binary.LittleEndian.PutUint64(b[i:], bits.ReverseBytes64(bits.Reverse64(x)))
 	}
-	return ^crc
+	for ; i < len(b); i++ {
+		b[i] = bits.Reverse8(b[i])
+	}
 }

@@ -222,6 +222,45 @@ func TestZeroRead(t *testing.T) {
 	}
 }
 
+// referenceCRC computes the bzip2 CRC one bit at a time.
+func referenceCRC(val uint32, b []byte) uint32 {
+	crc := ^val
+	for _, v := range b {
+		crc ^= uint32(v) << 24
+		for range 8 {
+			if crc&0x80000000 != 0 {
+				crc = crc<<1 ^ 0x04c11db7
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return ^crc
+}
+
+func TestUpdateCRC(t *testing.T) {
+	// The check value of CRC-32/BZIP2.
+	if got, want := updateCRC(0, []byte("123456789")), uint32(0xfc891918); got != want {
+		t.Errorf("updateCRC(0, %q) = %#x, want %#x", "123456789", got, want)
+	}
+
+	b := make([]byte, 2000)
+	for i := range b {
+		b[i] = byte(i*i*31 + i)
+	}
+	orig := bytes.Clone(b)
+	for _, val := range []uint32{0, 0x12345678} {
+		for n := range len(b) + 1 {
+			if got, want := updateCRC(val, b[:n]), referenceCRC(val, b[:n]); got != want {
+				t.Fatalf("updateCRC(%#x, b[:%d]) = %#x, want %#x", val, n, got, want)
+			}
+			if !bytes.Equal(b, orig) {
+				t.Fatalf("updateCRC(%#x, b[:%d]) modified b", val, n)
+			}
+		}
+	}
+}
+
 var (
 	digits = mustLoadFile("testdata/e.txt.bz2")
 	newton = mustLoadFile("testdata/Isaac.Newton-Opticks.txt.bz2")
