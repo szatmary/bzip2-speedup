@@ -47,6 +47,11 @@ func trim(b []byte) string {
 	return fmt.Sprintf("%q...", b[:limit])
 }
 
+var zeros1MiB = mustDecodeHex("" +
+	"425a683931415926535938571ce50008084000c0040008200030cc0529a60806" +
+	"c4201e2ee48a70a12070ae39ca",
+)
+
 func TestReader(t *testing.T) {
 	var vectors = []struct {
 		desc   string
@@ -77,11 +82,8 @@ func TestReader(t *testing.T) {
 		),
 		output: make([]byte, 32),
 	}, {
-		desc: "1MiB zeros",
-		input: mustDecodeHex("" +
-			"425a683931415926535938571ce50008084000c0040008200030cc0529a60806" +
-			"c4201e2ee48a70a12070ae39ca",
-		),
+		desc:   "1MiB zeros",
+		input:  zeros1MiB,
 		output: make([]byte, 1<<20),
 	}, {
 		desc:   "random data",
@@ -210,6 +212,30 @@ func TestMTF(t *testing.T) {
 		t.Log(mtf)
 		if sym != v.sym {
 			t.Errorf("test %d, symbol mismatch: Decode(%d) = %d, want %d", i, v.idx, sym, v.sym)
+		}
+	}
+}
+
+// The block and stream CRCs check the output.
+func TestReaderReadSizes(t *testing.T) {
+	inputs := map[string][]byte{
+		"digits":   digits,
+		"newton":   newton,
+		"random":   random,
+		"sawtooth": mustLoadFile("testdata/pass-sawtooth.bz2"),
+		"zeros":    zeros1MiB,
+	}
+	for name, input := range inputs {
+		for _, size := range []int{1, 4097, 64 << 10} {
+			r := NewReader(bytes.NewReader(input))
+			buf := make([]byte, size)
+			var err error
+			for err == nil {
+				_, err = r.Read(buf)
+			}
+			if err != io.EOF {
+				t.Errorf("%s, reading %d bytes at a time: %v", name, size, err)
+			}
 		}
 	}
 }
