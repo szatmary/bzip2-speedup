@@ -122,7 +122,7 @@ func (t *huffmanTree) fillTable(nodeIndex uint16, prefix, depth uint) {
 }
 
 // newHuffmanTree builds a Huffman tree from a slice containing the code
-// lengths of each symbol. The maximum code length is 32 bits.
+// lengths of each symbol. The maximum code length is maxCodeLength bits.
 func newHuffmanTree(lengths []uint8) (huffmanTree, error) {
 	// There are many possible trees that assign the same code length to
 	// each symbol (consider reflecting a tree down the middle, for
@@ -134,6 +134,9 @@ func newHuffmanTree(lengths []uint8) (huffmanTree, error) {
 
 	if len(lengths) < 2 {
 		panic("newHuffmanTree: too few symbols")
+	}
+	if slices.Max(lengths) > maxCodeLength {
+		panic("newHuffmanTree: code too long")
 	}
 
 	var t huffmanTree

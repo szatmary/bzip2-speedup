@@ -249,6 +249,38 @@ func TestReaderStopsAtEndOfStream(t *testing.T) {
 	}
 }
 
+func TestReaderErrorsAreSticky(t *testing.T) {
+	badStreamCRC := bytes.Clone(helloWorld)
+	badStreamCRC[len(badStreamCRC)-2] ^= 1
+
+	// A block with 7 Huffman trees, which is invalid, before a valid one.
+	var w bitWriter
+	w.write(bzip2FileMagic<<16|'h'<<8|'1', 32)
+	writeRunBlock(&w, 10, 2)
+	w.write(bzip2BlockMagic, 48)
+	w.write(0, 32+1+24) // CRC, randomized and origPtr
+	w.write(0x8000, 16)
+	w.write(0x4000, 16)
+	w.write(7, 3)
+	writeRunBlock(&w, 10, 2)
+	w.write(bzip2FinalMagic, 48)
+	w.write(0, 32) // never checked
+	badBlock := w.bytes()
+
+	for _, input := range [][]byte{badStreamCRC, badBlock} {
+		r := NewReader(bytes.NewReader(input))
+		_, err := io.ReadAll(r)
+		if err == nil {
+			t.Fatalf("decoding %x: unexpected success", input)
+		}
+		for range 3 {
+			if n, err2 := r.Read(make([]byte, 100)); n != 0 || err2 != err {
+				t.Errorf("decoding %x: Read after error %v = %d, %v; want 0, %v", input, err, n, err2, err)
+			}
+		}
+	}
+}
+
 func TestBitReader(t *testing.T) {
 	var vectors = []struct {
 		nbits uint // Number of bits to read
