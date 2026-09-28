@@ -12,6 +12,15 @@ import (
 // A huffmanTree is a binary tree which is navigated, bit-by-bit to reach a
 // symbol.
 type huffmanTree struct {
+	// table maps the next tableBits bits of input to the code they begin
+	// with, as symbol<<5 | length, or, for a longer code, to the node they
+	// reach, as nodeIndex<<5. tableBits is at most huffmanTableBits, but no
+	// more than the longest code, so that the table for a small tree is
+	// cheap to fill: otherwise a stream of many tiny blocks could make the
+	// decoder spend most of its time filling tables.
+	table     [1 << huffmanTableBits]uint16
+	tableBits uint
+
 	// nodes contains all the non-leaf nodes in the tree. nodes[0] is the
 	// root of the tree and nextNode contains the index of the next element
 	// of nodes to use when the tree is being constructed.
@@ -37,6 +46,12 @@ const invalidNodeValue = 0xffff
 // maxCodeLength is the maximum length of a Huffman code, in bits.
 const maxCodeLength = 20
 
+// huffmanTableBits is the most bits of input that index a table.
+const huffmanTableBits = 10
+
+// maxHuffmanTrees is the most Huffman trees a block can use.
+const maxHuffmanTrees = 6
+
 // Decode reads bits from the given bitReader and navigates the tree until a
 // symbol is found.
 func (t *huffmanTree) Decode(br *bitReader) (v uint16) {
@@ -46,13 +61,23 @@ func (t *huffmanTree) Decode(br *bitReader) (v uint16) {
 
 	// The buffered bits, padded with zeros if the input ended early.
 	w := br.n << (64 - br.bits)
-	nodeIndex := uint16(0) // node 0 is the root of the tree.
+	e := t.table[w>>(64-t.tableBits)]
+	if n := uint(e & 31); n != 0 {
+		br.consume(n)
+		return e >> 5
+	}
+	return t.walk(br, e>>5, t.tableBits, w<<t.tableBits)
+}
 
-	for depth := uint(1); ; depth++ {
+// walk navigates the tree from nodeIndex, depth bits from the root, using the
+// bits of w.
+func (t *huffmanTree) walk(br *bitReader, nodeIndex uint16, depth uint, w uint64) (v uint16) {
+	for {
 		node := &t.nodes[nodeIndex]
 
 		bit := uint16(w >> 63)
 		w <<= 1
+		depth++
 
 		// Trick a compiler into generating conditional move instead of branch,
 		// by making both loads unconditional.
@@ -79,9 +104,33 @@ func (t *huffmanTree) Decode(br *bitReader) (v uint16) {
 	}
 }
 
-// newHuffmanTree builds a Huffman tree from a slice containing the code
+// fillTable fills the table entries for the inputs that begin with prefix,
+// the depth-bit path from the root to nodeIndex.
+func (t *huffmanTree) fillTable(nodeIndex uint16, prefix, depth uint) {
+	node := &t.nodes[nodeIndex]
+	children := [2]struct{ index, value uint16 }{
+		{node.right, node.rightValue}, // bit 0
+		{node.left, node.leftValue},   // bit 1
+	}
+	for bit, child := range children {
+		p, d := prefix<<1|uint(bit), depth+1
+		switch {
+		case child.index == invalidNodeValue:
+			shift := t.tableBits - d
+			for i := p << shift; i < (p+1)<<shift; i++ {
+				t.table[i] = child.value<<5 | uint16(d)
+			}
+		case d == t.tableBits:
+			t.table[p] = child.index << 5
+		default:
+			t.fillTable(child.index, p, d)
+		}
+	}
+}
+
+// build builds the Huffman tree, in place, from a slice containing the code
 // lengths of each symbol. The maximum code length is maxCodeLength bits.
-func newHuffmanTree(lengths []uint8) (huffmanTree, error) {
+func (t *huffmanTree) build(lengths []uint8) error {
 	// There are many possible trees that assign the same code length to
 	// each symbol (consider reflecting a tree down the middle, for
 	// example). Since the code length assignments determine the
@@ -91,13 +140,12 @@ func newHuffmanTree(lengths []uint8) (huffmanTree, error) {
 	// only the code length assignments.
 
 	if len(lengths) < 2 {
-		panic("newHuffmanTree: too few symbols")
+		panic("huffmanTree.build: too few symbols")
 	}
-	if slices.Max(lengths) > maxCodeLength {
-		panic("newHuffmanTree: code too long")
+	maxLength := slices.Max(lengths)
+	if maxLength > maxCodeLength {
+		panic("huffmanTree.build: code too long")
 	}
-
-	var t huffmanTree
 
 	// First we sort the code length assignments by ascending code length,
 	// using the symbol value to break ties.
@@ -141,8 +189,13 @@ func newHuffmanTree(lengths []uint8) (huffmanTree, error) {
 	})
 
 	t.nodes = make([]huffmanNode, len(codes))
-	_, err := buildHuffmanNode(&t, codes, 0)
-	return t, err
+	t.nextNode = 0
+	if _, err := buildHuffmanNode(t, codes, 0); err != nil {
+		return err
+	}
+	t.tableBits = min(huffmanTableBits, uint(maxLength))
+	t.fillTable(0, 0, 0)
+	return nil
 }
 
 // huffmanSymbolLengthPair contains a symbol and its code length.

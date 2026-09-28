@@ -4,7 +4,10 @@
 
 package bzip2
 
-import "bytes"
+import (
+	"bytes"
+	"runtime"
+)
 
 // A bitWriter writes bits most-significant first, as bzip2 streams hold them.
 type bitWriter struct {
@@ -90,4 +93,13 @@ func writeRunBlock(w *bitWriter, run, numTrees int) uint32 {
 		w.write(codes[s].code, codes[s].bits)
 	}
 	return crc
+}
+
+// allocated returns the number of bytes f allocates.
+func allocated(f func()) int64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return int64(after.TotalAlloc - before.TotalAlloc)
 }
