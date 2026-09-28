@@ -33,7 +33,6 @@ type reader struct {
 	tt           []uint32  // mirrors the ``tt'' array in the bzip2 source and contains the P array in the upper 24 bits.
 	tPos         uint32    // Index of the next output byte in tt.
 	pairs        []uint32  // pairs[i] is tt[tt[i]>>8], for walking tt two bytes at a time.
-	first        []byte    // first[i] is the byte in tt[i].
 
 	preRLE      []uint32 // contains the RLE data still to be processed.
 	preRLEUsed  int      // number of entries of preRLE used.
@@ -177,17 +176,17 @@ func (bz2 *reader) readFromBlock(buf []byte) int {
 
 // walk follows the inverse BWT to the next bytes of the block.
 func (bz2 *reader) walk() {
-	pairs, first, tPos := bz2.pairs, bz2.first, bz2.tPos
-	walked := bz2.walkBuf[:min(len(bz2.walkBuf), len(bz2.preRLE)-bz2.preRLEUsed)]
+	tt, pairs, tPos := bz2.preRLE, bz2.pairs, bz2.tPos
+	walked := bz2.walkBuf[:min(len(bz2.walkBuf), len(tt)-bz2.preRLEUsed)]
 	i := 0
 	for ; i+1 < len(walked); i += 2 {
 		p := pairs[tPos]
-		walked[i] = first[tPos]
+		walked[i] = byte(tt[tPos])
 		walked[i+1] = byte(p)
 		tPos = p >> 8
 	}
 	if i < len(walked) {
-		t := bz2.preRLE[tPos]
+		t := tt[tPos]
 		walked[i] = byte(t)
 		tPos = t >> 8
 	}
@@ -473,10 +472,13 @@ func (bz2 *reader) readBlock() (err error) {
 	bz2.preRLEUsed = 0
 	bz2.tPos = inverseBWT(bz2.preRLE, origPtr, bz2.c[:])
 	if len(bz2.pairs) < bufIndex {
-		bz2.pairs = make([]uint32, bufIndex)
-		bz2.first = make([]byte, bufIndex)
+		// Grow geometrically, up to the block size, rather than to fit
+		// each block, so that a stream whose blocks keep growing can't
+		// make the decoder reallocate for every block.
+		n := min(max(bufIndex, 2*len(bz2.pairs)), bz2.blockSize)
+		bz2.pairs = make([]uint32, n)
 	}
-	pairUp(bz2.preRLE, bz2.pairs, bz2.first)
+	pairUp(bz2.preRLE, bz2.pairs)
 	bz2.lastByte = -1
 	bz2.byteRepeats = 0
 	bz2.repeats = 0
@@ -510,14 +512,13 @@ func inverseBWT(tt []uint32, origPtr uint, c []uint) uint32 {
 	return tt[origPtr] >> 8
 }
 
-// pairUp fills pairs and first for tt. Walking tt is a chain of dependent
-// loads, bound by memory latency. Walking pairs gives two bytes per load,
-// and the loads here are independent.
-func pairUp(tt, pairs []uint32, first []byte) {
-	pairs, first = pairs[:len(tt)], first[:len(tt)]
+// pairUp fills pairs for tt. Walking tt is a chain of dependent loads,
+// bound by memory latency. Walking pairs gives two bytes per load, and the
+// loads here are independent.
+func pairUp(tt, pairs []uint32) {
+	pairs = pairs[:len(tt)]
 	for i, t := range tt {
 		pairs[i] = tt[t>>8]
-		first[i] = byte(t)
 	}
 }
 

@@ -240,6 +240,44 @@ func TestReaderReadSizes(t *testing.T) {
 	}
 }
 
+// A stream whose blocks keep growing mustn't make the decoder reallocate
+// for each block.
+func TestDecodeGrowingBlocksAllocations(t *testing.T) {
+	var runs []int
+	for i := range 16 {
+		runs = append(runs, 6000*(i+1))
+	}
+	decode := func(runs ...int) int64 {
+		var n int64
+		var err error
+		input := runStream(1, 2, runs...)
+		a := allocated(func() { n, err = io.Copy(io.Discard, NewReader(bytes.NewReader(input))) })
+		want := 0
+		for _, run := range runs {
+			want += run
+		}
+		if err != nil || n != int64(want) {
+			t.Fatalf("decoding blocks of %v bytes: got %d bytes, %v", runs, n, err)
+		}
+		return a
+	}
+	all, largest := decode(runs...), decode(runs[len(runs)-1])
+	if all > 2*largest {
+		t.Errorf("decoding growing blocks allocated %d bytes, more than twice the %d for the largest block alone", all, largest)
+	}
+}
+
+// pairs grows geometrically, but never beyond the block size.
+func TestPairsWithinBlockSize(t *testing.T) {
+	r := NewReader(bytes.NewReader(runStream(1, 2, 60000, 61000))).(*reader)
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.pairs) > r.blockSize {
+		t.Errorf("len(pairs) = %d, more than the block size, %d", len(r.pairs), r.blockSize)
+	}
+}
+
 func TestZeroRead(t *testing.T) {
 	b := mustDecodeHex("425a6839314159265359b5aa5098000000600040000004200021008283177245385090b5aa5098")
 	r := NewReader(bytes.NewReader(b))
