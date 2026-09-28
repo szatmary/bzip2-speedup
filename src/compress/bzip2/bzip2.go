@@ -26,8 +26,8 @@ type reader struct {
 	fileCRC      uint32
 	blockCRC     uint32
 	wantBlockCRC uint32
-	setupDone    bool // true if we have parsed the bzip2 header.
-	eof          bool
+	setupDone    bool      // true if we have parsed the bzip2 header.
+	err          error     // returned by every Read after the first to fail.
 	blockSize    int       // blockSize in bytes, i.e. 900 * 1000.
 	c            [256]uint // the ``C'' array for the inverse BWT.
 	tt           []uint32  // mirrors the ``tt'' array in the bzip2 source and contains the P array in the upper 24 bits.
@@ -83,9 +83,12 @@ func (bz2 *reader) setup(needMagic bool) error {
 }
 
 func (bz2 *reader) Read(buf []byte) (n int, err error) {
-	if bz2.eof {
-		return 0, io.EOF
+	if bz2.err != nil {
+		return 0, bz2.err
 	}
+
+	// Leave the underlying reader positioned just after the input consumed.
+	defer bz2.br.commit()
 
 	if !bz2.setupDone {
 		err = bz2.setup(true)
@@ -94,6 +97,7 @@ func (bz2 *reader) Read(buf []byte) (n int, err error) {
 			err = brErr
 		}
 		if err != nil {
+			bz2.err = err
 			return 0, err
 		}
 		bz2.setupDone = true
@@ -104,6 +108,7 @@ func (bz2 *reader) Read(buf []byte) (n int, err error) {
 	if brErr != nil {
 		err = brErr
 	}
+	bz2.err = err
 	return
 }
 
@@ -204,17 +209,16 @@ func (bz2 *reader) read(buf []byte) (int, error) {
 			if br.bits%8 != 0 {
 				br.ReadBits(br.bits % 8)
 			}
-			b, err := br.r.ReadByte()
+			b, err := br.readByte()
 			if err == io.EOF {
 				br.err = io.EOF
-				bz2.eof = true
 				return 0, io.EOF
 			}
 			if err != nil {
 				br.err = err
 				return 0, err
 			}
-			z, err := br.r.ReadByte()
+			z, err := br.readByte()
 			if err != nil {
 				if err == io.EOF {
 					err = io.ErrUnexpectedEOF
@@ -318,7 +322,7 @@ func (bz2 *reader) readBlock() (err error) {
 		length := br.ReadBits(5)
 		for j := range lengths {
 			for {
-				if length < 1 || length > 20 {
+				if length < 1 || length > maxCodeLength {
 					return StructuralError("Huffman length out of range")
 				}
 				if !br.ReadBit() {
