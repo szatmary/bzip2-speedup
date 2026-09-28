@@ -84,7 +84,7 @@ func (br *bitReader) commit() {
 // fill reads whole bytes until more than 56 bits are buffered. It is only
 // called while decoding a Huffman symbol, which is always followed by at
 // least 80 bits (a magic number and a CRC), so it never reads past the end
-// of the stream.
+// of a valid stream.
 func (br *bitReader) fill() {
 	if len(br.window)-br.pos >= 8 {
 		v := binary.BigEndian.Uint64(br.window[br.pos:])
@@ -107,11 +107,20 @@ func (br *bitReader) fill() {
 // consume discards n bits, failing if fill ran out of input.
 func (br *bitReader) consume(n uint) {
 	if n > br.bits {
-		br.bits = 0
-		br.readFailed(br.readErr)
+		br.missingBits()
 		return
 	}
 	br.bits -= n
+}
+
+// missingBits reports that fill ran out of input before a whole code was
+// buffered. Codes are at most maxCodeLength bits, so otherwise it's a bug.
+func (br *bitReader) missingBits() {
+	if br.readErr == nil {
+		panic("bzip2: code longer than maxCodeLength")
+	}
+	br.bits = 0
+	br.readFailed(br.readErr)
 }
 
 func (br *bitReader) readFailed(err error) {
