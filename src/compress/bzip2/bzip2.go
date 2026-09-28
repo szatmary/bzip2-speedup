@@ -33,6 +33,11 @@ type reader struct {
 	tt           []uint32  // mirrors the ``tt'' array in the bzip2 source and contains the P array in the upper 24 bits.
 	tPos         uint32    // Index of the next output byte in tt.
 
+	// The Huffman trees of the current block. They are rebuilt in place for
+	// each block, rather than allocated, so that a stream of many tiny blocks
+	// can't make the decoder allocate a set of tables for each one.
+	huffmanTrees [maxHuffmanTrees]huffmanTree
+
 	preRLE      []uint32 // contains the RLE data still to be processed.
 	preRLEUsed  int      // number of entries of preRLE used.
 	lastByte    int      // the last byte value seen.
@@ -273,7 +278,7 @@ func (bz2 *reader) readBlock() (err error) {
 
 	// A block uses between two and six different Huffman trees.
 	numHuffmanTrees := br.ReadBits(3)
-	if numHuffmanTrees < 2 || numHuffmanTrees > 6 {
+	if numHuffmanTrees < 2 || numHuffmanTrees > maxHuffmanTrees {
 		return StructuralError("invalid number of Huffman trees")
 	}
 
@@ -313,7 +318,7 @@ func (bz2 *reader) readBlock() (err error) {
 	mtf := newMTFDecoder(symbols)
 
 	numSymbols += 2 // to account for RUNA and RUNB symbols
-	huffmanTrees := make([]huffmanTree, numHuffmanTrees)
+	huffmanTrees := bz2.huffmanTrees[:numHuffmanTrees]
 
 	// Now we decode the arrays of code-lengths for each tree.
 	lengths := make([]uint8, numSymbols)
@@ -336,7 +341,7 @@ func (bz2 *reader) readBlock() (err error) {
 			}
 			lengths[j] = uint8(length)
 		}
-		huffmanTrees[i], err = newHuffmanTree(lengths)
+		err = huffmanTrees[i].build(lengths)
 		if err != nil {
 			return err
 		}

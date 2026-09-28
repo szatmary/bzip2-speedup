@@ -419,8 +419,8 @@ func TestHuffmanDecode(t *testing.T) {
 	}}
 
 	for _, v := range vectors {
-		tree, err := newHuffmanTree(v.lengths)
-		if err != nil {
+		var tree huffmanTree
+		if err := tree.build(v.lengths); err != nil {
 			t.Fatalf("%s: %v", v.desc, err)
 		}
 		br := newBitReader(bytes.NewReader(bitsToBytes(v.input + " 10100101")))
@@ -441,6 +441,35 @@ func TestDecodeTestdata(t *testing.T) {
 		if _, err := io.Copy(io.Discard, NewReader(bytes.NewReader(input))); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// oneByteBlocks returns a stream of n blocks of one byte, each with 6
+// Huffman trees.
+func oneByteBlocks(n int) []byte {
+	runs := make([]int, n)
+	for i := range runs {
+		runs[i] = 1
+	}
+	return runStream(1, 6, runs...)
+}
+
+// A stream of many small blocks mustn't make the decoder allocate much for
+// each block.
+func TestDecodeManyBlocksAllocations(t *testing.T) {
+	decode := func(blocks int) int64 {
+		var out []byte
+		var err error
+		input := oneByteBlocks(blocks)
+		n := allocated(func() { out, err = io.ReadAll(NewReader(bytes.NewReader(input))) })
+		if err != nil || len(out) != blocks {
+			t.Fatalf("decoding %d blocks: got %d bytes, %v", blocks, len(out), err)
+		}
+		return n
+	}
+	const limit = 1024
+	if perBlock := (decode(2000) - decode(1000)) / 1000; perBlock > limit {
+		t.Errorf("decoding allocated %d bytes per block, want at most %d", perBlock, limit)
 	}
 }
 
@@ -497,6 +526,10 @@ func benchmarkDecode(b *testing.B, compressed []byte, newSource func([]byte) io.
 }
 
 func newBytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
+
+func BenchmarkDecodeManyBlocks(b *testing.B) {
+	benchmarkDecode(b, oneByteBlocks(1000), newBytesReader)
+}
 
 func BenchmarkDecodeDigits(b *testing.B) { benchmarkDecode(b, digits, newBytesReader) }
 func BenchmarkDecodeNewton(b *testing.B) { benchmarkDecode(b, newton, newBytesReader) }
