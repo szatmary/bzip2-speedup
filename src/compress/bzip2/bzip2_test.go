@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"internal/obscuretestdata"
 	"io"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -267,14 +268,45 @@ func TestDecodeGrowingBlocksAllocations(t *testing.T) {
 	}
 }
 
-// pairs grows geometrically, but never beyond the block size.
-func TestPairsWithinBlockSize(t *testing.T) {
+// back grows geometrically, but never beyond the block size.
+func TestBackWithinBlockSize(t *testing.T) {
 	r := NewReader(bytes.NewReader(runStream(1, 2, 60000, 61000))).(*reader)
 	if _, err := io.Copy(io.Discard, r); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.pairs) > r.blockSize {
-		t.Errorf("len(pairs) = %d, more than the block size, %d", len(r.pairs), r.blockSize)
+	if len(r.back) > r.blockSize {
+		t.Errorf("len(back) = %d, more than the block size, %d", len(r.back), r.blockSize)
+	}
+}
+
+// walkBlock must give the same bytes as a single forward walk, even for a
+// corrupt block whose links form several cycles, so that the two chains don't
+// meet.
+func TestWalkBlock(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	for range 1000 {
+		n := 1 + rng.IntN(100)
+		// Random links, with random bytes, and the inverse links.
+		tt, back := make([]uint32, n), make([]uint32, n)
+		for i, p := range rng.Perm(n) {
+			tt[i] = uint32(p)<<8 | uint32(rng.IntN(256))
+		}
+		for i, e := range tt {
+			back[e>>8] = uint32(i)<<8 | e&0xff
+		}
+		origPtr := uint(rng.IntN(n))
+
+		want := make([]byte, n)
+		p := tt[origPtr] >> 8
+		for i := range want {
+			want[i] = byte(tt[p])
+			p = tt[p] >> 8
+		}
+		got := make([]byte, n)
+		walkBlock(tt, back, origPtr, got)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("walkBlock(%x, origPtr %d) = %x, want %x", tt, origPtr, got, want)
+		}
 	}
 }
 
