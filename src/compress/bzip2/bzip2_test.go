@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"internal/obscuretestdata"
 	"io"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -47,6 +48,11 @@ func trim(b []byte) string {
 	return fmt.Sprintf("%q...", b[:limit])
 }
 
+var zeros1MiB = mustDecodeHex("" +
+	"425a683931415926535938571ce50008084000c0040008200030cc0529a60806" +
+	"c4201e2ee48a70a12070ae39ca",
+)
+
 func TestReader(t *testing.T) {
 	var vectors = []struct {
 		desc   string
@@ -77,11 +83,8 @@ func TestReader(t *testing.T) {
 		),
 		output: make([]byte, 32),
 	}, {
-		desc: "1MiB zeros",
-		input: mustDecodeHex("" +
-			"425a683931415926535938571ce50008084000c0040008200030cc0529a60806" +
-			"c4201e2ee48a70a12070ae39ca",
-		),
+		desc:   "1MiB zeros",
+		input:  zeros1MiB,
 		output: make([]byte, 1<<20),
 	}, {
 		desc:   "random data",
@@ -210,6 +213,99 @@ func TestMTF(t *testing.T) {
 		t.Log(mtf)
 		if sym != v.sym {
 			t.Errorf("test %d, symbol mismatch: Decode(%d) = %d, want %d", i, v.idx, sym, v.sym)
+		}
+	}
+}
+
+// The block and stream CRCs check the output.
+func TestReaderReadSizes(t *testing.T) {
+	inputs := map[string][]byte{
+		"digits":   digits,
+		"newton":   newton,
+		"random":   random,
+		"sawtooth": mustLoadFile("testdata/pass-sawtooth.bz2"),
+		"zeros":    zeros1MiB,
+	}
+	for name, input := range inputs {
+		for _, size := range []int{1, 4097, 64 << 10} {
+			r := NewReader(bytes.NewReader(input))
+			buf := make([]byte, size)
+			var err error
+			for err == nil {
+				_, err = r.Read(buf)
+			}
+			if err != io.EOF {
+				t.Errorf("%s, reading %d bytes at a time: %v", name, size, err)
+			}
+		}
+	}
+}
+
+// A stream whose blocks keep growing mustn't make the decoder reallocate
+// for each block.
+func TestDecodeGrowingBlocksAllocations(t *testing.T) {
+	var runs []int
+	for i := range 16 {
+		runs = append(runs, 6000*(i+1))
+	}
+	decode := func(runs ...int) int64 {
+		var n int64
+		var err error
+		input := runStream(1, 2, runs...)
+		a := allocated(func() { n, err = io.Copy(io.Discard, NewReader(bytes.NewReader(input))) })
+		want := 0
+		for _, run := range runs {
+			want += run
+		}
+		if err != nil || n != int64(want) {
+			t.Fatalf("decoding blocks of %v bytes: got %d bytes, %v", runs, n, err)
+		}
+		return a
+	}
+	all, largest := decode(runs...), decode(runs[len(runs)-1])
+	if all > 2*largest {
+		t.Errorf("decoding growing blocks allocated %d bytes, more than twice the %d for the largest block alone", all, largest)
+	}
+}
+
+// back grows geometrically, but never beyond the block size.
+func TestBackWithinBlockSize(t *testing.T) {
+	r := NewReader(bytes.NewReader(runStream(1, 2, 60000, 61000))).(*reader)
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.back) > r.blockSize {
+		t.Errorf("len(back) = %d, more than the block size, %d", len(r.back), r.blockSize)
+	}
+}
+
+// walkBlock must give the same bytes as a single forward walk, even for a
+// corrupt block whose links form several cycles, so that the two chains don't
+// meet.
+func TestWalkBlock(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	for range 1000 {
+		n := 1 + rng.IntN(100)
+		// Random links, with random bytes, and the inverse links.
+		tt, back := make([]uint32, n), make([]uint32, n)
+		for i, p := range rng.Perm(n) {
+			tt[i] = uint32(p)<<8 | uint32(rng.IntN(256))
+		}
+		for i, e := range tt {
+			back[e>>8] = uint32(i)<<8 | e&0xff
+		}
+		origPtr := uint(rng.IntN(n))
+
+		want := make([]byte, n)
+		p := tt[origPtr] >> 8
+		for i := range want {
+			want[i] = byte(tt[p])
+			p = tt[p] >> 8
+		}
+		got := make([]byte, n)
+		walkBlock(tt, back, origPtr, got)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("walkBlock(%x, origPtr %d) = %x, want %x", tt, origPtr, got, want)
 		}
 	}
 }
